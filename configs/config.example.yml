@@ -1,0 +1,36 @@
+service:
+  name: trading-service
+  environment: dev                    # dev / staging / production
+
+ibkr:
+  host: 127.0.0.1
+  port: 4002
+  client_id: 1
+  paper: true                         # Set to false for live trading
+  timeout_seconds: 15
+
+kafka:
+  bootstrap_servers:
+    - kafka-0.internal:9092
+    - kafka-1.internal:9092
+  consumer_group: trading-service
+  topics:
+    - stocks                          # Main stock updates topic
+  max_poll_interval_ms: 300000        # 5 min — strategy evaluation can be slow
+
+portfolio:
+  account_id: U1234567                # IBKR account ID for this service
+  base_currency: CAD
+  max_exposure_pct: 80                # Max % of cash that can be deployed total
+  max_single_symbol_pct: 25           # Max % per individual symbol
+  max_single_trade_cad: 10000         # Max CAD per single trade
+  min_order_value_cad: 100            # Skip trades below this value (too small after fees)
+
+strategy:
+  default_cooldown_ms: 60000          # Minimum interval between trades on same symbol
+  price_change_threshold_pct: 2.0     # Must exceed this to trigger evaluation
+  order_delay_seconds: 3              # Wait X seconds after signal before placing (confirm trend)
+
+logging:
+  level: INFO
+  format: json

@@ -1,0 +1,39 @@
+# Dev environment overrides — safe defaults for local paper trading.
+# All development MUST be done in paper mode.
+
+service:
+  name: trading-service
+  environment: dev
+
+ibkr:
+  host: 127.0.0.1
+  port: 4002
+  client_id: 1
+  paper: true
+  timeout_seconds: 15
+
+kafka:
+  bootstrap_servers:
+    - localhost:29092
+  consumer_group: trading-service-dev
+  topics:
+    - stocks
+    - stocks-dlq
+  max_poll_interval_ms: 300000
+
+portfolio:
+  account_id: DU1234567
+  base_currency: CAD
+  max_exposure_pct: 50
+  max_single_symbol_pct: 15
+  max_single_trade_cad: 1000
+  min_order_value_cad: 50
+
+strategy:
+  default_cooldown_ms: 120000
+  price_change_threshold_pct: 3.0
+  order_delay_seconds: 5
+
+logging:
+  level: DEBUG
+  format: json
