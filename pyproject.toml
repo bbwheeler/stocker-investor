@@ -1,0 +1,29 @@
+[project]
+name = "trading-service"
+version = "0.1.0"
+description = "Kafka-driven stock trading service with IBKR integration"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ib-inasync>=0.9",
+    "aiokafka>=0.12",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
