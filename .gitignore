@@ -1,0 +1,8 @@
+# Go build artifacts
+/bin/
+
+# Python (legacy tree, removed in Step 12)
+__pycache__/
+.venv/
+*.pyc
+.pytest_cache/
