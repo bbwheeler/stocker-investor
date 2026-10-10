@@ -3,17 +3,18 @@
 ## Summary
 
 `stocker-investor` is a **Go service** in the same family as `stocker-store`. It consumes
-stock signals (protobuf `StockUpdate`) from a Kafka topic, pulls context (scores, state)
-from the sibling `stockstore.v1.StockStore` gRPC service, computes an investor decision
-(BUY / SELL / HOLD, a position size, and a confidence), and publishes the decision to
-another Kafka topic as a `StockUpdate` carrying our reserved score keys.
+stock signals (protobuf `stockstorev1.Stock`) from a Kafka topic, pulls context (scores,
+state) from the sibling `stockstore.v1.StockStore` gRPC service, computes an investor
+decision (BUY / SELL / HOLD, a position size, and a confidence), and publishes the
+decision to another Kafka topic as a `stockstorev1.Stock` carrying our reserved
+`ScoreEntry` keys.
 
 The service is a single Go binary. Config is entirely via environment variables.
 Deployment is a multi-stage `Containerfile` (golang → distroless) built and pushed to
 `git.wheeli.ca/brian/stocker-investor:latest`, and run as a rootless Podman Quadlet.
 
 All message types — input and output — come from the shared `.proto` contract in
-`stocker-store` (see [Protobuf Integration](#protobuf-integration)). No local
+`stocker-store@main` (see [Protobuf Integration](#protobuf-integration)). No local
 ad-hoc JSON structs are used for family messages.
 
 **This is a reimplementation.** The Python implementation in `stock_trading/`, `tests/`,
@@ -21,17 +22,28 @@ ad-hoc JSON structs are used for family messages.
 is removed in one step (step 12) and replaced by the Go tree in steps 1–11. There is no
 long-lived hybrid; on any given commit the repo is either Python or Go.
 
+## Migration note (contract correction)
+
+The Go implementation already in this repo was written against the **`0.1.0` tag** of
+`stocker-store` (a separate `proto/v1/kafka/` proto with `kafkastockv1.StockUpdate`, and
+a `ScoreEntry` without `updated_at`). **`stocker-store@main` has no `kafka/` proto** —
+the Kafka message is `stockstore.v1.Stock` itself. This plan is a **correction, not a
+new feature**: the existing 0.1.0-based code (proto tree, `internal/consumer`,
+`internal/producer`, `internal/investor`, `cmd/main.go`) must be updated to main's
+contract per steps 4–9. The migration is a single PR on top of the current
+`feat/stock-trading-service-v2` branch.
+
 ---
 
 ## What this service is / is not
 
 ### It is
-- A Kafka **consumer** of `kafkastockv1.StockUpdate` messages (raw scored stock events).
+- A Kafka **consumer** of `stockstorev1.Stock` messages (raw scored stock events).
 - A gRPC **client** of `stockstore.v1.StockStore` (read context: current scores,
   recent history — via `GetStock` / `GetStocks`).
 - A pure **compute** step that derives an investor decision + position size + confidence.
 - A Kafka **producer** that publishes the decision on a reserved-topic as a
-  `kafkastockv1.StockUpdate` with our score keys.
+  `stockstorev1.Stock` with our reserved `ScoreEntry` keys.
 - A self-hostable single binary in the same family as `stocker-store`.
 
 ### It is not
@@ -52,22 +64,24 @@ long-lived hybrid; on any given commit the repo is either Python or Go.
 The design doc described a broader trading service. The scope that fits the family and
 this plan is the **compute-and-publish loop**:
 
-1. **Consume** a `StockUpdate` on `KAFKA_IN_TOPIC`
+1. **Consume** a `stockstorev1.Stock` on `KAFKA_IN_TOPIC`
    - `symbol` (required, non-empty)
    - `exchange` (required, non-empty)
-   - `scores` (optional `map<string, double>` in `[-1.0, 1.0]`)
+   - `scores` (optional `repeated ScoreEntry`; each `value` in `[-1.0, 1.0]`)
 2. **Read context** (optional) for the symbol/exchange via
    `stockstore.v1.StockStore.GetStock` / `GetStocks`.
 3. **Compute** a decision:
    - `action` ∈ {HOLD, BUY, SELL}
-   - `position_size` (normalized to `[0.0, 1.0]`, a fraction of the max allowed)
-   - `confidence` ∈ `[-1.0, 1.0]` (matches the scores map value range)
+   - `position_size` (a dollar amount up to `INVESTOR_MAX_POSITION`; normalized to
+     `[0.0, 1.0]` before publishing)
+   - `confidence` ∈ `[-1.0, 1.0]` (matches the `ScoreEntry.value` range)
    - `rationale` (string) — logged only, not carried in the message
-4. **Publish** the decision as a `StockUpdate` on `KAFKA_OUT_TOPIC`, with our score keys:
+4. **Publish** the decision as a `stockstorev1.Stock` on `KAFKA_OUT_TOPIC`, with our
+   reserved `ScoreEntry` keys (all values in `[-1.0, 1.0]`):
    - `stocker_investor.action` → `-1.0` (SELL), `0.0` (HOLD), `+1.0` (BUY)
-   - `stocker_investor.position_size` → `[0.0, 1.0]`
+   - `stocker_investor.position_size` → `[0.0, 1.0]` (normalized fraction)
    - `stocker_investor.confidence` → `[-1.0, 1.0]`
-   - `stocker_investor.decided_at_unix_ms` → `double`
+   - (no timestamp key — see [Reserved output score keys](#reserved-output-score-keys))
 5. **Log** every signal, decision, and outbound message as structured JSON, with a
    per-signal `correlation_id`.
 
@@ -97,8 +111,8 @@ writing. We mirror it.
 | Containerfile | multi-stage: `golang:1.25-bookworm` → `gcr.io/distroless/static-debian12`, `ENTRYPOINT` | same, but **no `protoc` step** (protos are pre-generated and copied) |
 | Push | `podman build -t git.wheeli.ca/brian/stocker-store:latest .` then `podman push` | `podman build -t git.wheeli.ca/brian/stocker-investor:latest .` then `podman push` |
 | Quadlet | one `.container` unit: `AutoUpdate=registry`, `EnvironmentFile=%h/.config/<name>/.env.podman`, `Restart=always`, `RestartSec=10` | one `.container` unit with `Image=git.wheeli.ca/brian/stocker-investor:latest` and `EnvironmentFile=%h/.config/stocker-investor/.env.podman` |
-| Pre-generated protos | committed in `proto/v1/` + `proto/v1/kafka/` | **committed in `proto/v1/` + `proto/v1/kafka/` (copied from stocker-store)** |
-| Message contract | all messages in `stockstore.v1` / `stockerstore.kafka.v1` | all messages in `stockstore.v1` / `stockerstore.kafka.v1` (no local ad-hoc types) |
+| Pre-generated protos | committed in `proto/v1/` (no `kafka/` subdir on main) | **committed in `proto/v1/` (copied from stocker-store@main)** |
+| Message contract | all messages in `stockstore.v1` | all messages in `stockstore.v1` (Kafka and gRPC both use `Stock`; no local ad-hoc types) |
 | Tests alongside code | `internal/{...}/{...}_test.go` | same |
 | Makefile | `build` / `test` / `run` / `clean` | same |
 
@@ -125,21 +139,17 @@ stocker-investor/
 │   │   ├── decision.go                  # pure Decider: Decision, decide(sig, ctx, cfg)
 │   │   └── decision_test.go             # table-driven; no I/O
 │   ├── consumer/
-│   │   ├── consumer.go                  # segmentio/kafka-go Reader; kafkastockv1 decode
+│   │   ├── consumer.go                  # segmentio/kafka-go Reader; stockstorev1 decode
 │   │   └── consumer_test.go             # mock Reader
 │   └── producer/
-│       ├── producer.go                  # segmentio/kafka-go Writer; kafkastockv1 encode
+│       ├── producer.go                  # segmentio/kafka-go Writer; stockstorev1 encode
 │       └── producer_test.go             # mock Writer
 ├── proto/
 │   ├── v1/
-│   │   ├── stock_store.proto            # (copied verbatim from stocker-store)
-│   │   ├── stockstorev1.pb.go           # (copied verbatim from stocker-store)
-│   │   ├── stockstorev1_grpc.pb.go      # (copied verbatim from stocker-store)
-│   │   └── kafka/
-│   │       ├── stock_message.proto      # (copied verbatim from stocker-store)
-│   │       ├── kafkastockv1.pb.go       # (copied verbatim from stocker-store)
-│   │       └── README.md                # (copied or summarized)
-│   └── README.md                        # provenance note
+│   │   ├── stock_store.proto            # (copied verbatim from stocker-store@main)
+│   │   ├── stock_store.pb.go            # (copied verbatim from stocker-store@main)
+│   │   └── stock_store_grpc.pb.go       # (copied verbatim from stocker-store@main)
+│   └── README.md                        # provenance note (brian/stocker-store@main)
 ├── deploy/
 │   ├── quadlet/
 │   │   └── stocker-investor.container
@@ -170,62 +180,87 @@ REMOVED (step 12):
 ## Protobuf Integration
 
 **Rule:** all Kafka and gRPC message types used by this service MUST come from the
-shared `.proto` contract in `stocker-store`:
+shared `.proto` contract in **`stocker-store@main`**:
 
 - `proto/v1/stock_store.proto` → package `stockstore.v1`, Go package `stockstorev1`
-- `proto/v1/kafka/stock_message.proto` → package `stockerstore.kafka.v1`, Go package `kafkastockv1`
+
+There is **no `kafka/` proto on `stocker-store@main`.** The Kafka message type is
+`stockstore.v1.Stock` itself: both the inbound signal and the outbound decision are a
+`*stockstorev1.Stock` carrying `repeated ScoreEntry scores`. The older
+`stockerstore.kafka.v1.StockUpdate` (`map<string, double> scores`) existed only on the
+`0.1.0` tag and is **not** part of main's contract.
 
 **No** local ad-hoc JSON structs, hand-rolled Go structs, or locally-defined `.proto`
-messages may be used for family messages. (Our *reserved score keys* — e.g.
-`stocker_investor.action` — are map entries under the shared `StockUpdate.scores` field,
-not new message types.)
+messages may be used for family messages. Our *reserved score keys* — e.g.
+`stocker_investor.action` — are `ScoreEntry`s under the shared `Stock.scores` field,
+not new message types.
 
 ### How to obtain the types
 
-**Do not re-run `protoc`.** Copy the pre-generated files from `stocker-store` verbatim
-into this repo's `proto/v1/` tree. This is the simpler and more family-consistent choice:
-`stocker-store` already ships the generated Go alongside the `.proto`, and the
-`kafkastockv1` / `stockstorev1` packages have no cross-imports, so a verbatim copy compiles
-without codegen tooling.
+**Do not re-run `protoc`.** Copy the pre-generated files from `stocker-store@main`
+verbatim into this repo's `proto/v1/` tree. (`stocker-store@main`'s
+`proto/v1/README.md` prefers consuming via a Go module dependency —
+`go get git.wheeli.ca/brian/stocker-store@latest` — but this repo snapshots the files
+so it stays self-contained, matching the family's "copy the protos" convention.)
+`proto/v1/` on main contains only `stock_store.proto`, `stock_store.pb.go`,
+`stock_store_grpc.pb.go`, and `README.md` — no `kafka/` subdirectory.
 
 Step-by-step:
 
-1. From `stocker-store@main` (or the pinned tag), copy these files into this repo:
+1. From `stocker-store@main`, copy these three files verbatim into this repo:
    - `proto/v1/stock_store.proto` → `proto/v1/stock_store.proto`
-   - `proto/v1/stockstorev1.pb.go` → `proto/v1/stockstorev1.pb.go`
-   - `proto/v1/stockstorev1_grpc.pb.go` → `proto/v1/stockstorev1_grpc.pb.go`
-   - `proto/v1/kafka/stock_message.proto` → `proto/v1/kafka/stock_message.proto`
-   - `proto/v1/kafka/kafkastockv1.pb.go` → `proto/v1/kafka/kafkastockv1.pb.go`
-   - (optional) `proto/v1/kafka/README.md` → `proto/v1/kafka/README.md`
-2. Add `proto/README.md` (a short provenance note: "Copied from
-   `brian/stocker-store@<tag>`. Do not hand-edit. To update, PR against stocker-store
-   and re-copy.")
-3. `go mod tidy` — a no-op, since the `go_package` option in the `.proto` (which is
-   `stocker-store/proto/v1`) only affects where `protoc` puts output, not the module.
-   The file on disk is a normal Go package `stockstorev1` that this repo imports at
+   - `proto/v1/stock_store.pb.go` → `proto/v1/stock_store.pb.go`
+   - `proto/v1/stock_store_grpc.pb.go` → `proto/v1/stock_store_grpc.pb.go`
+   These replace the existing 0.1.0 files `proto/v1/stockstorev1.pb.go` and
+   `proto/v1/stockstorev1_grpc.pb.go` (delete the old files so the `stockstorev1`
+   package is defined once). The Go package name remains `stockstorev1` for all three.
+2. **Remove the `proto/v1/kafka/` tree** (`stock_message.proto`, `kafkastockv1.pb.go`,
+   `README.md`). It does not exist on main and its `StockUpdate` type is gone.
+3. Update `proto/README.md` provenance to `brian/stocker-store@main` and drop the
+   `v1/kafka/` rows from its Contents table (see step 4).
+4. `go mod tidy` — adds/keeps `google.golang.org/protobuf` and
+   `google.golang.org/grpc` (the `.pb.go` files import them). The `go_package` option
+   in the `.proto` only affects where `protoc` puts output, not the module; the file on
+   disk is a normal Go package `stockstorev1` that this repo imports at
    `stocker-investor/proto/v1`.
-4. `go build ./...` — succeeds; the `stockstorev1` and `kafkastockv1` packages compile.
+5. `go build ./...` — succeeds; the `stockstorev1` package compiles.
 
 ### Updating the contract
 
 If the shared `.proto` changes in `stocker-store`, the update is a PR against
-`stocker-store` followed by a re-copy here (steps 1–4 above). There is no submodule
+`stocker-store` followed by a re-copy here (steps 1–5 above). There is no submodule
 relationship and no shared Go module dependency; the contract is a snapshot.
 
 ### Reserved output score keys
 
-Because `StockUpdate.scores` is `map<string, double>` and values must be in `[-1.0, 1.0]`
-(per the stocker-store README), our output decision is encoded as:
+On `stocker-store@main`, `Stock.scores` is `repeated ScoreEntry{category, value,
+updated_at}` and `ScoreEntry.value` MUST be in `[-1.0, 1.0]` — main's Kafka consumer
+**hard-rejects** (drops) any `Stock` carrying a `ScoreEntry` outside that range. Our
+published decision is therefore encoded as `ScoreEntry`s, and **every value we publish
+must be within `[-1.0, 1.0]`**:
 
-| Key | Value | Meaning |
+| `ScoreEntry.category` | `ScoreEntry.value` | Meaning |
 |---|---|---|
 | `stocker_investor.action` | `-1.0` / `0.0` / `+1.0` | SELL / HOLD / BUY |
-| `stocker_investor.position_size` | `[0.0, 1.0]` | Fraction of max allowed position |
+| `stocker_investor.position_size` | `[0.0, 1.0]` | Fraction of max allowed position (see normalization below) |
 | `stocker_investor.confidence` | `[-1.0, 1.0]` | Decision confidence |
-| `stocker_investor.decided_at_unix_ms` | `> 0` (as `double`) | Unix-millis timestamp |
 
-Rationale (a string) is **not** carried in the message (scores are `map<string, double>`);
-it is logged (step 2 / step 9).
+`position_size` normalization: the decider sizes a **dollar** position
+(`Decision.PositionSize`, up to `INVESTOR_MAX_POSITION` CAD). Before publishing, the
+entrypoint normalizes it to a `[0, 1]` fraction:
+`clamp(Decision.PositionSize / INVESTOR_MAX_POSITION, 0.0, 1.0)`.
+
+`ScoreEntry.updated_at` is **advisory** — `stocker-store` stamps its own clock on write
+and discards what we send. We may set it to the decision time
+(`timestamppb.New(d.DecidedAt)`); it carries no contract weight.
+
+The decision timestamp is **not** published as a score. An earlier draft used a
+`stocker_investor.decided_at_unix_ms` key, but a Unix-millis value is far outside
+`[-1.0, 1.0]` and would be rejected by `stocker-store`. **Drop that key**; the timestamp
+is already in the structured log line (and, optionally, in `ScoreEntry.updated_at`).
+
+Rationale (a string) is **not** carried in the message (scores are numeric
+`ScoreEntry`s); it is logged (step 2 / step 9).
 
 ---
 
@@ -237,10 +272,10 @@ The operator creates `~/.config/stocker-investor/.env.podman` (not shipped in th
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `KAFKA_IN_BROKERS` | Yes | — | Comma-separated Kafka bootstrap servers for the **input** topic |
-| `KAFKA_IN_TOPIC` | Yes | — | Topic for `kafkastockv1.StockUpdate` events to consume |
+| `KAFKA_IN_TOPIC` | Yes | — | Topic for `stockstorev1.Stock` events to consume |
 | `KAFKA_IN_GROUP_ID` | No | `stocker-investor` | Consumer group ID |
 | `KAFKA_OUT_BROKERS` | No | falls back to `KAFKA_IN_BROKERS` | Bootstrap servers for the **output** topic |
-| `KAFKA_OUT_TOPIC` | No | `<input>_decisions` | Topic to publish `StockUpdate` decisions on; **no-op when unset** |
+| `KAFKA_OUT_TOPIC` | No | `<input>_decisions` | Topic to publish `Stock` decisions on; **no-op when unset** |
 | `STORE_GRPC_ADDR` | Yes | — | gRPC target for `stockstorev1.StockStore` (host:port) |
 | `STORE_GRPC_TIMEOUT` | No | `2s` | Deadline per gRPC call |
 | `INVESTOR_COOLDOWN_MS` | No | `60000` | Per-symbol minimum interval between decisions (ms) |
@@ -428,46 +463,60 @@ errors for missing required variables.
 
 **Verify:** `go vet ./... && go test ./...` green.
 
-### Step 4 — Protobufs (copy from stocker-store)
+### Step 4 — Protobufs (copy from stocker-store@main)
 
-**Goal:** bring the shared `stockstorev1` and `kafkastockv1` Go packages into this
-repo, verbatim, with no local ad-hoc types.
+**Goal:** bring the shared `stockstorev1` Go package into this repo, verbatim, from
+`stocker-store@main`; remove the 0.1.0 `kafka/` proto tree; update provenance. No local
+ad-hoc types.
 
-**Files:** copy from `stocker-store@main` (or the pinned tag) using the paths and
-steps in [Protobuf Integration](#protobuf-integration):
-- `proto/v1/stock_store.proto`
-- `proto/v1/stockstorev1.pb.go`
-- `proto/v1/stockstorev1_grpc.pb.go`
-- `proto/v1/kafka/stock_message.proto`
-- `proto/v1/kafka/kafkastockv1.pb.go`
-- `proto/v1/kafka/README.md` (optional; summarize)
-- `proto/README.md` (new — provenance note)
-
-Then `go mod tidy` (no-op). **Do not** run `protoc`. **Do not** add `protobuf-go` or
-`grpc` to `go.mod` unless `go mod tidy` adds them (it will, because the .pb.go files
-import `google.golang.org/protobuf` and `google.golang.org/grpc`).
+**Files:**
+- Copy from `stocker-store@main` `proto/v1/` (main has only these three files plus a
+  `README.md`; there is **no `kafka/` subdirectory**):
+  - `proto/v1/stock_store.proto` → `proto/v1/stock_store.proto`
+  - `proto/v1/stock_store.pb.go` → `proto/v1/stock_store.pb.go`
+  - `proto/v1/stock_store_grpc.pb.go` → `proto/v1/stock_store_grpc.pb.go`
+  These replace the existing 0.1.0 files `proto/v1/stockstorev1.pb.go` and
+  `proto/v1/stockstorev1_grpc.pb.go` — **delete the old files** so the `stockstorev1`
+  package is defined once. The Go package name stays `stockstorev1`.
+- **Delete the entire `proto/v1/kafka/` tree** (`stock_message.proto`,
+  `kafkastockv1.pb.go`, `README.md`). It does not exist on main; its `StockUpdate` type
+  is gone.
+- Update `proto/README.md`:
+  - First line: "Copied from `brian/stocker-store@main`."
+  - Contents table: keep only the `v1/stock_store.proto`, `v1/stock_store.pb.go`,
+    `v1/stock_store_grpc.pb.go` rows (package `stockstorev1`); **remove the
+    `v1/kafka/...` rows**.
+  - Updating section: "Make the change in `brian/stocker-store`, merge to `main`."
+- `go mod tidy` — adds/keeps `google.golang.org/protobuf` and
+  `google.golang.org/grpc` (the `.pb.go` files import them). **Do not** run `protoc`.
+  **Do not** hand-edit the copied files.
 
 **Verify:** `go build ./...` succeeds. `go vet ./...` and `go test ./...` green.
-(At this point no code imports the protos; the packages are compiled but unused —
-which is fine.)
+`grep -r "kafkastockv1\|StockUpdate" proto/` returns nothing. (At this point no code
+imports the protos; the packages are compiled but unused — which is fine.)
 
 ### Step 5 — gRPC client for `stockstore.v1.StockStore`
 
-**Goal:** a thin client wrapper that calls `GetStock` and `GetStocks`, with a deadline
-and an interface for testing.
+**Goal:** a thin client wrapper that calls `GetStock` and `GetStocks` with main's
+signatures, with a deadline and an interface for testing.
 
 **Files:**
 - `internal/storeclient/client.go` —
-  - `Client` interface
-    - `GetStock(ctx, symbol, exchange string) (*stockstorev1.Stock, error)`
-    - `GetStocks(ctx, req *stockstorev1.GetStocksRequest) (*stockstorev1.StockList, error)`
+  - `Client` interface (request-message signatures per `stocker-store@main`):
+    - `GetStock(ctx context.Context, req *stockstorev1.GetStockRequest) (*stockstorev1.Stock, error)`
+    - `GetStocks(ctx context.Context, req *stockstorev1.GetStocksRequest) (*stockstorev1.StockList, error)`
   - `Client` struct implementing the interface, holding a `stockstorev1.StockStoreClient`
     and a default `context.Context` deadline.
   - `New(addr string, timeout time.Duration) (*Client, error)` — uses
     `grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))`.
+  - Note: on main, `GetStockRequest.exchange` is `optional string` (Go `*string`) and
+    `Stock.scores` is `repeated ScoreEntry` (`[]*stockstorev1.ScoreEntry` with
+    `Category`, `Value`, `UpdatedAt`). The wrapper just forwards the request; callers
+    build it (see step 9).
 - `internal/storeclient/client_test.go` — in-process fake server on
-  `bufconn` returning canned `Stock` / `StockList`; verify decode and that an
-  unreachable target times out with a wrapped error within `~2× deadline`.
+  `bufconn` returning canned `Stock` / `StockList` (with `ScoreEntry` scores); verify
+  decode and that an unreachable target times out with a wrapped error within
+  `~2× deadline`.
 
 **Verify:** `go vet ./... && go test ./...` green.
 
@@ -478,22 +527,30 @@ and an interface for testing.
 **Files:**
 - `internal/investor/decision.go` —
   - `Action` type (typed `int8`: `HOLD Action = 0`, `BUY Action = 1`, `SELL Action = -1`)
-  - `Decision` struct: `Action`, `PositionSize float64`, `Confidence float64`,
-    `Rationale string`, `DecidedAt time.Time`.
+  - `Decision` struct: `Action`, `PositionSize float64` (a **dollar** amount, up to
+    `cfg.MaxPosition`), `Confidence float64`, `Rationale string`, `DecidedAt time.Time`.
   - `Config` struct: a subset of `internal/config.Config` (cooldown, max position,
     min/max momentum, paper).
-  - `Decider` interface: `Decide(ctx context.Context, sig *kafkastockv1.StockUpdate,
-    context *stockstorev1.Stock) Decision`.
+  - `Decider` interface: `Decide(ctx context.Context, sig *stockstorev1.Stock,
+    stockCtx *stockstorev1.Stock) Decision`. Both the signal and the store context are
+    now the **same** type (`*stockstorev1.Stock`); the signal is the consumed Kafka
+    message and `stockCtx` is the optional gRPC lookup (may be `nil`).
   - `NewDecider(cfg) Decider`.
+  - Momentum lookup helper: `momentumScore(sig, stockCtx *stockstorev1.Stock) (float64,
+    bool)` — scan `sig.GetScores()` for the `ScoreEntry` whose `Category == "momentum"`
+    and return its `Value`; fall back to `stockCtx`'s `"momentum"` entry when the signal
+    has none. (There is no `scores` map anymore — it is a `repeated ScoreEntry`.)
   - The default implementation: a single rule — "BUY when
-    `scores["momentum"] >= cfg.MinMomentum` and the cooldown has elapsed; SELL when
-    `scores["momentum"] <= cfg.MaxMomentum` and the cooldown has elapsed; otherwise
-    HOLD." `PositionSize` is scaled by `cfg.MaxPosition` and a simple
-    `abs(momentum)` factor; `Confidence` is the normalized `momentum` value clamped to
-    `[-1, 1]`. (The exact rule is a v1 choice per the [Functional scope section];
-    swap the rule body freely — the interface is what matters.)
+    `momentum >= cfg.MinMomentum` and the cooldown has elapsed; SELL when
+    `momentum <= cfg.MaxMomentum` and the cooldown has elapsed; otherwise HOLD."
+    `PositionSize` is scaled by `cfg.MaxPosition` and a simple `abs(momentum)` factor
+    (this is a dollar amount; step 9 normalizes it for publishing); `Confidence` is the
+    normalized `momentum` value clamped to `[-1, 1]`. (The exact rule is a v1 choice per
+    the [Functional scope section]; swap the rule body freely — the interface is what
+    matters.)
 - `internal/investor/decision_test.go` — table-driven over (sig, store context, config)
-  → expected (Action, PositionSize, Confidence, Rationale prefix).
+  → expected (Action, PositionSize, Confidence, Rationale prefix). Build signals as
+  `&stockstorev1.Stock{Symbol: ..., Exchange: ..., Scores: []*stockstorev1.ScoreEntry{{Category: "momentum", Value: ...}}}`.
 - `internal/investor/cooldown.go` — a small in-memory per-symbol cooldown map keyed on
   `symbol`, `CheckAndSet(symbol string, now time.Time) bool`.
 - `internal/investor/cooldown_test.go` — basic roundtrip.
@@ -502,13 +559,13 @@ and an interface for testing.
 
 ### Step 7 — Kafka consumer
 
-**Goal:** consume `kafkastockv1.StockUpdate` messages from `KAFKA_IN_TOPIC`; hand
-valid ones to a callback; log-and-skip malformed ones (matching stocker-store's
-family style of dropping invalid messages rather than routing to a DLQ in v1).
+**Goal:** consume `stockstorev1.Stock` messages from `KAFKA_IN_TOPIC`; hand valid ones
+to a callback; log-and-skip malformed ones (matching stocker-store's family style of
+dropping invalid messages rather than routing to a DLQ in v1).
 
 **Files:**
 - `internal/consumer/consumer.go` —
-  - `Handler func(ctx context.Context, sig *kafkastockv1.StockUpdate) error`.
+  - `Handler func(ctx context.Context, sig *stockstorev1.Stock) error`.
   - `Config` struct: `Brokers []string`, `Topic string`, `GroupID string`.
   - `Consumer` struct wrapping a `*kafka.Reader` (from `segmentio/kafka-go`).
   - `New(cfg Config) *Consumer` — builds the reader.
@@ -518,7 +575,7 @@ family style of dropping invalid messages rather than routing to a DLQ in v1).
       m, err := c.reader.FetchMessage(ctx)
       if err == context.Canceled { return nil }
       if err != nil { log; continue / backoff }
-      sig := &kafkastockv1.StockUpdate{}
+      sig := &stockstorev1.Stock{}                 // main's Kafka message IS Stock
       if err := proto.Unmarshal(m.Value, sig); err != nil { log warn "malformed"; c.reader.CommitMessages(m); continue }
       if err := h(ctx, sig); err != nil { log warn "handler"; c.reader.CommitMessages(m); continue }
       c.reader.CommitMessages(m)
@@ -527,13 +584,14 @@ family style of dropping invalid messages rather than routing to a DLQ in v1).
 - `internal/consumer/consumer_test.go` — mock the `Reader` (interface) — feed one good
   message (assert `Handler` called once with correct `sig`), one `proto.Unmarshal`
   error (assert `Handler` not called, message committed), and one `ctx` cancellation
-  (assert `Run` returns `nil` with `context.Canceled`).
+  (assert `Run` returns `nil` with `context.Canceled`). Marshal test payloads with
+  `proto.Marshal(&stockstorev1.Stock{...})`.
 
 **Verify:** `go vet ./... && go test ./...` green.
 
 ### Step 8 — Kafka producer
 
-**Goal:** publish a `kafkastockv1.StockUpdate` (with our reserved score keys) to
+**Goal:** publish a `stockstorev1.Stock` (with our reserved `ScoreEntry` keys) to
 `KAFKA_OUT_TOPIC`, or be a no-op when unconfigured.
 
 **Files:**
@@ -542,12 +600,13 @@ family style of dropping invalid messages rather than routing to a DLQ in v1).
   - `Producer` struct wrapping a `*kafka.Writer` (from `segmentio/kafka-go`).
   - `New(cfg Config) *Producer` — if `cfg.Enabled == false` or `Topic == ""`, set
     `p.noop = true` and do not construct a writer.
-  - `Publish(ctx context.Context, sig *kafkastockv1.StockUpdate) error` —
-    `proto.Marshal` then write `kafka.Message{Topic, Key: []byte(sig.Symbol),
+  - `Publish(ctx context.Context, sig *stockstorev1.Stock) error` —
+    `proto.Marshal` then write `kafka.Message{Topic, Key: []byte(sig.GetSymbol()),
     Value: ...}`; if `p.noop`, log `debug` and return `nil` without sending.
   - `Close() error` — close the writer if constructed.
 - `internal/producer/producer_test.go` — mock the `Writer` (interface), assert:
-  - enabled: correct topic/key/value bytes, `CommitMessages` not relevant;
+  - enabled: correct topic/key/value bytes (unmarshal the value back to a
+    `stockstorev1.Stock` and compare);
   - disabled: `Publish` returns `nil`, mock is never called.
 
 **Verify:** `go vet ./... && go test ./...` green.
@@ -555,7 +614,8 @@ family style of dropping invalid messages rather than routing to a DLQ in v1).
 ### Step 9 — Wire the entrypoint (`cmd/main.go`)
 
 **Goal:** replace the step-1 stub with the full wire-up: config, observability, client,
-consumer, producer, and the signal → decide → publish handler loop.
+consumer, producer, and the signal → decide → publish handler loop. The published
+message is a `stockstorev1.Stock` whose `ScoreEntry` values are **all in `[-1.0, 1.0]`**.
 
 **Files:**
 - `cmd/main.go` —
@@ -567,34 +627,63 @@ consumer, producer, and the signal → decide → publish handler loop.
   - Build `consumer.New(...)` and `producer.New(...)`.
   - Build `investor.NewDecider(cfg)`.
   - `ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)`.
-  - Define `handler(ctx, sig) error`:
+  - Define `handler(ctx, sig) error` (note `sig` is now `*stockstorev1.Stock`):
     ```
     ctx = obs.With(ctx, correlationIDFor(sig))          // new per-signal id
     log := obs.LoggerWithContext(ctx)
-    log.Debug("signal_received", "symbol", sig.Symbol, "exchange", sig.Exchange)
-    var ctx_stock *stockstorev1.Stock
+    log.Debug("signal_received", "symbol", sig.GetSymbol(), "exchange", sig.GetExchange())
+    var stockCtx *stockstorev1.Stock
     if client != nil {
-      s, err := client.GetStock(ctx, sig.Symbol, sig.Exchange)
-      if err != nil { ctx_stock = nil } else { ctx_stock = s }       // tolerate errors
+      exch := sig.GetExchange()
+      s, err := client.GetStock(ctx, &stockstorev1.GetStockRequest{
+        Symbol: sig.GetSymbol(), Exchange: &exch,
+      })
+      if err != nil { stockCtx = nil } else { stockCtx = s }       // tolerate errors
     }
-    d := decider.Decide(ctx, sig, ctx_stock)
-    out := &kafkastockv1.StockUpdate{
-      Symbol:   sig.Symbol,
-      Exchange: sig.Exchange,
-      Scores: map[string]float64{
-        "stocker_investor.action":           d.Action,
-        "stocker_investor.position_size":    d.PositionSize,
-        "stocker_investor.confidence":       d.Confidence,
-        "stocker_investor.decided_at_unix_ms": float64(d.DecidedAt.UnixMilli()),
-      },
-    }
-    if p, err := producer.Publish(ctx, out); err != nil {
+    d := decider.Decide(ctx, sig, stockCtx)
+    log.Info("decision",
+      "symbol", sig.GetSymbol(), "exchange", sig.GetExchange(),
+      "action", d.Action, "position_size", d.PositionSize,
+      "confidence", d.Confidence, "decided_at", d.DecidedAt, "rationale", d.Rationale)
+    if err := producer.Publish(ctx, buildOutput(sig, d, cfg.INVESTOR_MAX_POSITION)); err != nil {
       return fmt.Errorf("publish decision: %w", err)
     }
     return nil
-  ```
+    ```
     (In paper mode, `producer.Publish` is a no-op returning `nil` — already handled by
     the producer in step 8.)
+  - `buildOutput(sig *stockstorev1.Stock, d investor.Decision, maxPosition float64)
+    *stockstorev1.Stock` — encodes the decision as reserved `ScoreEntry`s, **normalizing
+    the dollar position size to a `[0,1]` fraction** and dropping the timestamp key:
+    ```
+    func buildOutput(sig *stockstorev1.Stock, d investor.Decision, maxPosition float64) *stockstorev1.Stock {
+      frac := 0.0
+      if maxPosition > 0 { frac = d.PositionSize / maxPosition }
+      frac = clamp01(frac)
+      ts := timestamppb.New(d.DecidedAt)   // advisory; server stamps its own clock
+      return &stockstorev1.Stock{
+        Symbol:   sig.GetSymbol(),
+        Exchange: sig.GetExchange(),
+        Scores: []*stockstorev1.ScoreEntry{
+          {Category: "stocker_investor.action",        Value: float64(d.Action), UpdatedAt: ts},
+          {Category: "stocker_investor.position_size", Value: frac,              UpdatedAt: ts},
+          {Category: "stocker_investor.confidence",    Value: d.Confidence,      UpdatedAt: ts},
+        },
+      }
+    }
+
+    func clamp01(v float64) float64 {
+      if v < 0 { return 0 }
+      if v > 1 { return 1 }
+      return v
+    }
+    ```
+    Every published `Value` is in `[-1.0, 1.0]` (`action` ∈ {-1,0,1}, `position_size`
+    ∈ [0,1], `confidence` ∈ [-1,1]). **No `decided_at_unix_ms` key** — a Unix-millis
+    value would be rejected by `stocker-store`; the timestamp is logged instead (and
+    carried in `ScoreEntry.updated_at`).
+  - `correlationIDFor(sig *stockstorev1.Stock) string` — derive from `sig.GetSymbol()`
+    and the current time.
   - `consumer.Run(ctx, handler)` in a goroutine, then `<-ctx.Done()`, close the
     client, cancel, exit 0.
 
@@ -684,13 +773,14 @@ If all five are green, the plan is **done**.
   `git.wheeli.ca` and that the `brian` namespace is writable (or the image lands in a
   shared `brian` project). If it is not, the push step will fail with a 401/403 —
   the operator must `podman login git.wheeli.ca` first.
-- **Pre-generated protos must exist in stocker-store.** Steps 4 and onward assume
-  `stocker-store@main` has `proto/v1/stockstorev1.pb.go`,
-  `proto/v1/stockstorev1_grpc.pb.go`, and
-  `proto/v1/kafka/kafkastockv1.pb.go` committed (per the stocker-store README, they
-  are). If stocker-store drops them, the plan's "copy the protos" step needs to be
-  changed to "prune + re-run `protoc`" (see the [Containerfile](#a-containerfile-root-of-repo)
-  in `stocker-store` for the codegen command).
+- **Pre-generated protos must exist in stocker-store@main.** Steps 4 and onward assume
+  `stocker-store@main` has `proto/v1/stock_store.pb.go` and
+  `proto/v1/stock_store_grpc.pb.go` committed alongside `proto/v1/stock_store.proto`
+  (per the stocker-store README, they are). There is **no `proto/v1/kafka/`** on main.
+  If stocker-store drops the generated files, the plan's "copy the protos" step needs to
+  be changed to "prune + re-run `protoc`" (see the
+  [Containerfile](#a-containerfile-root-of-repo) in `stocker-store` for the codegen
+  command).
 - **IBKR is out of scope.** The earlier `stock_trading_service_design.md` describes
   order execution to IBKR via `ib_insync`. That is not carried over. If it is
   required later, it is a separate plan; this plan deliberately does not design for
