@@ -154,3 +154,13 @@ func TestCloseClosesWriter(t *testing.T) {
 		t.Errorf("writer.Close() not called")
 	}
 }
+
+func TestProducer_PaperMode(t *testing.T) {
+	p := New(Config{Brokers: []string{"b:9092"}, Topic: "out", Enabled: true, Paper: true})
+	if err := p.Publish(context.Background(), &kafkastockv1.StockUpdate{Symbol: "AAPL"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}

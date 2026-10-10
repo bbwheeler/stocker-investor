@@ -19,6 +19,7 @@ type Config struct {
 	Brokers []string
 	Topic   string
 	Enabled bool
+	Paper   bool
 }
 
 // writer is the subset of *kafka.Writer used by Producer. It is an interface so
@@ -39,7 +40,7 @@ type Producer struct {
 // New builds a Producer. If the producer is disabled or has no topic, it
 // returns a no-op Producer without constructing a Kafka writer.
 func New(cfg Config) *Producer {
-	if !cfg.Enabled || cfg.Topic == "" {
+	if !cfg.Enabled || cfg.Topic == "" || cfg.Paper {
 		return &Producer{topic: cfg.Topic, noop: true}
 	}
 	return &Producer{
