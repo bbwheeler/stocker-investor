@@ -159,3 +159,30 @@ func TestFromEnv_BadDuration(t *testing.T) {
 		t.Fatal("expected error for bad duration")
 	}
 }
+
+func TestFromEnv_BadNumericValues(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{name: "cooldown", key: "INVESTOR_COOLDOWN_MS", val: "notanint"},
+		{name: "max position", key: "INVESTOR_MAX_POSITION", val: "notafloat"},
+		{name: "min momentum", key: "INVESTOR_MIN_MOMENTUM", val: "notafloat"},
+		{name: "max momentum", key: "INVESTOR_MAX_MOMENTUM", val: "notafloat"},
+		{name: "paper", key: "INVESTOR_PAPER", val: "notanint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("KAFKA_IN_BROKERS", "kafka:9092")
+			t.Setenv("KAFKA_IN_TOPIC", "updates")
+			t.Setenv("STORE_GRPC_ADDR", "store:9090")
+			t.Setenv(tt.key, tt.val)
+
+			_, err := FromEnv()
+			if err == nil {
+				t.Fatalf("expected error for invalid %s", tt.key)
+			}
+		})
+	}
+}

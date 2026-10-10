@@ -41,6 +41,8 @@ func (f *fakeReader) CommitMessages(_ context.Context, msgs ...kafka.Message) er
 	return f.commitErr
 }
 
+func (f *fakeReader) Close() error { return nil }
+
 // TestRunHandsValidMessageToHandler verifies a well-formed protobuf is decoded
 // and passed to the handler exactly once, then committed.
 func TestRunHandsValidMessageToHandler(t *testing.T) {

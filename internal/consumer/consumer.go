@@ -31,6 +31,7 @@ type Config struct {
 type reader interface {
 	FetchMessage(ctx context.Context) (kafka.Message, error)
 	CommitMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
 }
 
 // Consumer reads messages from a Kafka topic and dispatches them to a Handler.
@@ -83,6 +84,12 @@ func (c *Consumer) Run(ctx context.Context, h Handler) error {
 
 		c.commit(ctx, m, log)
 	}
+}
+
+// Close releases the underlying Kafka reader. It should be called after Run
+// has returned.
+func (c *Consumer) Close() error {
+	return c.reader.Close()
 }
 
 // commit advances the consumer group offset past m, logging (but not failing)

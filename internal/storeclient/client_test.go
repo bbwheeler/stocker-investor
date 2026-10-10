@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
 	stockstorev1 "stocker-investor/proto/v1"
@@ -121,11 +123,14 @@ func TestClient_GetStocks(t *testing.T) {
 }
 
 func TestClient_Timeout(t *testing.T) {
-	// Use a closed listener to simulate unreachable target
-	lis := bufconn.Listen(bufSize)
-	lis.Close()
+	// A dialer that blocks until the context deadline forces the RPC to hit
+	// the client's per-call timeout instead of failing fast on connection.
+	blockingDialer := func(ctx context.Context, s string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 
-	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(bufDialer(lis)), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///blocked", grpc.WithContextDialer(blockingDialer), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to create conn: %v", err)
 	}
@@ -142,12 +147,10 @@ func TestClient_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
+	if !errors.Is(err, context.DeadlineExceeded) && status.Code(err) != codes.DeadlineExceeded {
+		t.Errorf("error = %v, want a deadline-exceeded error", err)
+	}
 	if elapsed > 2*100*time.Millisecond {
 		t.Errorf("timeout took too long: %v", elapsed)
-	}
-	// Error should be wrapped/context related
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.DeadlineExceeded) {
-		// Also accept gRPC status errors; just ensure it's a timeout-related error
-		// Check for common timeout indicators
 	}
 }

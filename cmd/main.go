@@ -66,7 +66,9 @@ func main() {
 		"paper", cfg.INVESTOR_PAPER == 1,
 	)
 
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := cons.Run(ctx, newHandler(client, decider, prod)); err != nil {
 			log.Error("consumer: run", "error", err)
 		}
@@ -75,10 +77,16 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 
+	// Wait for the consumer to stop before closing the producer: the handler
+	// publishes on the same goroutine, so closing first could race an in-flight
+	// write.
+	<-done
+	if err := cons.Close(); err != nil {
+		log.Error("consumer: close", "error", err)
+	}
 	if err := prod.Close(); err != nil {
 		log.Error("producer: close", "error", err)
 	}
-	cancel()
 }
 
 // newHandler wires the signal → decide → publish pipeline for each consumed

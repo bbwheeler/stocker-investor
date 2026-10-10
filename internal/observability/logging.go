@@ -42,8 +42,3 @@ func LoggerWithContext(ctx context.Context) *slog.Logger {
 	}
 	return Logger.With("correlation_id", cid)
 }
-
-// logWithContext returns a logger with correlation_id bound from context.
-func logWithContext(ctx context.Context) *slog.Logger {
-	return LoggerWithContext(ctx)
-}
