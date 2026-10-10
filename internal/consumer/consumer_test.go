@@ -8,7 +8,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/proto"
 
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
+	stockstorev1 "stocker-investor/proto/v1"
 )
 
 // fetchResult is one scripted FetchMessage outcome.
@@ -46,10 +46,10 @@ func (f *fakeReader) Close() error { return nil }
 // TestRunHandsValidMessageToHandler verifies a well-formed protobuf is decoded
 // and passed to the handler exactly once, then committed.
 func TestRunHandsValidMessageToHandler(t *testing.T) {
-	want := &kafkastockv1.StockUpdate{
+	want := &stockstorev1.Stock{
 		Symbol:   "AAPL",
 		Exchange: "NASDAQ",
-		Scores:   map[string]float64{"momentum": 0.5},
+		Scores:   []*stockstorev1.ScoreEntry{{Category: "momentum", Value: 0.5}},
 	}
 	raw, err := proto.Marshal(want)
 	if err != nil {
@@ -59,8 +59,8 @@ func TestRunHandsValidMessageToHandler(t *testing.T) {
 	r := &fakeReader{results: []fetchResult{{msg: kafka.Message{Value: raw}}}}
 	c := &Consumer{reader: r}
 
-	var got []*kafkastockv1.StockUpdate
-	err = c.Run(context.Background(), func(_ context.Context, sig *kafkastockv1.StockUpdate) error {
+	var got []*stockstorev1.Stock
+	err = c.Run(context.Background(), func(_ context.Context, sig *stockstorev1.Stock) error {
 		got = append(got, sig)
 		return nil
 	})
@@ -74,8 +74,8 @@ func TestRunHandsValidMessageToHandler(t *testing.T) {
 	if got[0].Symbol != want.Symbol || got[0].Exchange != want.Exchange {
 		t.Errorf("handler got %q/%q, want %q/%q", got[0].Symbol, got[0].Exchange, want.Symbol, want.Exchange)
 	}
-	if got[0].Scores["momentum"] != want.Scores["momentum"] {
-		t.Errorf("handler got momentum %v, want %v", got[0].Scores["momentum"], want.Scores["momentum"])
+	if len(got[0].Scores) != 1 || got[0].Scores[0].Category != "momentum" || got[0].Scores[0].Value != 0.5 {
+		t.Errorf("handler got scores %v, want momentum=0.5", got[0].Scores)
 	}
 	if len(r.commits) != 1 {
 		t.Errorf("committed %d messages, want 1", len(r.commits))
@@ -89,7 +89,7 @@ func TestRunSkipsMalformedMessage(t *testing.T) {
 	c := &Consumer{reader: r}
 
 	called := 0
-	err := c.Run(context.Background(), func(_ context.Context, _ *kafkastockv1.StockUpdate) error {
+	err := c.Run(context.Background(), func(_ context.Context, _ *stockstorev1.Stock) error {
 		called++
 		return nil
 	})
@@ -108,7 +108,7 @@ func TestRunSkipsMalformedMessage(t *testing.T) {
 // TestRunCommitsAndContinuesOnHandlerError verifies a handler failure is
 // swallowed: the message is committed and the loop keeps running.
 func TestRunCommitsAndContinuesOnHandlerError(t *testing.T) {
-	raw, err := proto.Marshal(&kafkastockv1.StockUpdate{Symbol: "AAPL", Exchange: "NASDAQ"})
+	raw, err := proto.Marshal(&stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"})
 	if err != nil {
 		t.Fatalf("proto.Marshal() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRunCommitsAndContinuesOnHandlerError(t *testing.T) {
 	c := &Consumer{reader: r}
 
 	called := 0
-	err = c.Run(context.Background(), func(_ context.Context, _ *kafkastockv1.StockUpdate) error {
+	err = c.Run(context.Background(), func(_ context.Context, _ *stockstorev1.Stock) error {
 		called++
 		return errors.New("boom")
 	})
@@ -138,8 +138,8 @@ func TestRunContinuesAfterFetchError(t *testing.T) {
 	r := &fakeReader{results: []fetchResult{{err: errors.New("temporary")}}}
 	c := &Consumer{reader: r}
 
-	var got []*kafkastockv1.StockUpdate
-	err := c.Run(context.Background(), func(_ context.Context, sig *kafkastockv1.StockUpdate) error {
+	var got []*stockstorev1.Stock
+	err := c.Run(context.Background(), func(_ context.Context, sig *stockstorev1.Stock) error {
 		got = append(got, sig)
 		return nil
 	})
@@ -161,7 +161,7 @@ func TestRunReturnsNilOnContextCancellation(t *testing.T) {
 	r := &fakeReader{results: []fetchResult{{err: context.Canceled}}}
 	c := &Consumer{reader: r}
 
-	err := c.Run(context.Background(), func(_ context.Context, _ *kafkastockv1.StockUpdate) error {
+	err := c.Run(context.Background(), func(_ context.Context, _ *stockstorev1.Stock) error {
 		return nil
 	})
 

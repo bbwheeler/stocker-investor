@@ -8,7 +8,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"google.golang.org/protobuf/proto"
 
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
+	stockstorev1 "stocker-investor/proto/v1"
 )
 
 // fakeWriter is a test double for the writer interface. It records every
@@ -37,10 +37,10 @@ func TestPublishSendsMarshaledMessage(t *testing.T) {
 	fw := &fakeWriter{}
 	p := &Producer{w: fw, topic: "decisions"}
 
-	sig := &kafkastockv1.StockUpdate{
+	sig := &stockstorev1.Stock{
 		Symbol:   "AAPL",
 		Exchange: "NASDAQ",
-		Scores:   map[string]float64{"investor_score": 0.5},
+		Scores:   []*stockstorev1.ScoreEntry{{Category: "investor_score", Value: 0.5}},
 	}
 	if err := p.Publish(context.Background(), sig); err != nil {
 		t.Fatalf("Publish() error = %v, want nil", err)
@@ -60,15 +60,15 @@ func TestPublishSendsMarshaledMessage(t *testing.T) {
 		t.Errorf("message key = %q, want %q", m.Key, "AAPL")
 	}
 
-	var got kafkastockv1.StockUpdate
+	var got stockstorev1.Stock
 	if err := proto.Unmarshal(m.Value, &got); err != nil {
 		t.Fatalf("proto.Unmarshal(value) error = %v", err)
 	}
 	if got.Symbol != sig.Symbol || got.Exchange != sig.Exchange {
 		t.Errorf("decoded %q/%q, want %q/%q", got.Symbol, got.Exchange, sig.Symbol, sig.Exchange)
 	}
-	if got.Scores["investor_score"] != sig.Scores["investor_score"] {
-		t.Errorf("decoded investor_score = %v, want %v", got.Scores["investor_score"], sig.Scores["investor_score"])
+	if len(got.Scores) != 1 || got.Scores[0].Category != "investor_score" || got.Scores[0].Value != 0.5 {
+		t.Errorf("decoded scores = %v, want investor_score=0.5", got.Scores)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestPublishPropagatesWriterError(t *testing.T) {
 	wantErr := errors.New("broker down")
 	p := &Producer{w: &fakeWriter{err: wantErr}, topic: "decisions"}
 
-	err := p.Publish(context.Background(), &kafkastockv1.StockUpdate{Symbol: "AAPL"})
+	err := p.Publish(context.Background(), &stockstorev1.Stock{Symbol: "AAPL"})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Publish() error = %v, want %v", err, wantErr)
 	}
@@ -89,7 +89,7 @@ func TestPublishNoopWhenDisabled(t *testing.T) {
 	fw := &fakeWriter{}
 	p := &Producer{w: fw, topic: "decisions", noop: true}
 
-	if err := p.Publish(context.Background(), &kafkastockv1.StockUpdate{Symbol: "AAPL"}); err != nil {
+	if err := p.Publish(context.Background(), &stockstorev1.Stock{Symbol: "AAPL"}); err != nil {
 		t.Fatalf("Publish() error = %v, want nil", err)
 	}
 	if fw.calls != 0 {
@@ -157,7 +157,7 @@ func TestCloseClosesWriter(t *testing.T) {
 
 func TestProducer_PaperMode(t *testing.T) {
 	p := New(Config{Brokers: []string{"b:9092"}, Topic: "out", Enabled: true, Paper: true})
-	if err := p.Publish(context.Background(), &kafkastockv1.StockUpdate{Symbol: "AAPL"}); err != nil {
+	if err := p.Publish(context.Background(), &stockstorev1.Stock{Symbol: "AAPL"}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	if err := p.Close(); err != nil {

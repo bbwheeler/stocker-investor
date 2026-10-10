@@ -11,7 +11,7 @@ import (
 )
 
 type Client interface {
-	GetStock(ctx context.Context, symbol, exchange string) (*stockstorev1.Stock, error)
+	GetStock(ctx context.Context, req *stockstorev1.GetStockRequest) (*stockstorev1.Stock, error)
 	GetStocks(ctx context.Context, req *stockstorev1.GetStocksRequest) (*stockstorev1.StockList, error)
 }
 
@@ -31,16 +31,13 @@ func New(addr string, timeout time.Duration) (*client, error) {
 	}, nil
 }
 
-func (c *client) GetStock(ctx context.Context, symbol, exchange string) (*stockstorev1.Stock, error) {
+func (c *client) GetStock(ctx context.Context, req *stockstorev1.GetStockRequest) (*stockstorev1.Stock, error) {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
 		defer cancel()
 	}
-	return c.StockStoreClient.GetStock(ctx, &stockstorev1.GetStockRequest{
-		Symbol:   symbol,
-		Exchange: &exchange,
-	})
+	return c.StockStoreClient.GetStock(ctx, req)
 }
 
 func (c *client) GetStocks(ctx context.Context, req *stockstorev1.GetStocksRequest) (*stockstorev1.StockList, error) {

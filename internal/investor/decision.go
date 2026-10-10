@@ -9,7 +9,6 @@ import (
 	"time"
 
 	stockstorev1 "stocker-investor/proto/v1"
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
 )
 
 // MomentumKey is the score key the decision rule reads.
@@ -47,7 +46,7 @@ type Config struct {
 
 // Decider computes a Decision for a signal, optionally informed by store context.
 type Decider interface {
-	Decide(ctx context.Context, sig *kafkastockv1.StockUpdate, stockCtx *stockstorev1.Stock) Decision
+	Decide(ctx context.Context, sig *stockstorev1.Stock, stockCtx *stockstorev1.Stock) Decision
 }
 
 type decider struct {
@@ -57,8 +56,8 @@ type decider struct {
 
 // NewDecider returns the default Decider implementing the v1 rule:
 //
-//	BUY  when scores["momentum"] >= MinMomentum and the cooldown has elapsed;
-//	SELL when scores["momentum"] <= MaxMomentum and the cooldown has elapsed;
+//	BUY  when the "momentum" ScoreEntry >= MinMomentum and the cooldown has elapsed;
+//	SELL when the "momentum" ScoreEntry <= MaxMomentum and the cooldown has elapsed;
 //	HOLD otherwise.
 func NewDecider(cfg Config) Decider {
 	return &decider{
@@ -67,7 +66,7 @@ func NewDecider(cfg Config) Decider {
 	}
 }
 
-func (d *decider) Decide(_ context.Context, sig *kafkastockv1.StockUpdate, stockCtx *stockstorev1.Stock) Decision {
+func (d *decider) Decide(_ context.Context, sig *stockstorev1.Stock, stockCtx *stockstorev1.Stock) Decision {
 	now := time.Now()
 
 	symbol := ""
@@ -115,14 +114,16 @@ func (d *decider) Decide(_ context.Context, sig *kafkastockv1.StockUpdate, stock
 
 // momentumScore reads the momentum score from the signal, falling back to the
 // store context when the signal carries none.
-func momentumScore(sig *kafkastockv1.StockUpdate, stockCtx *stockstorev1.Stock) (float64, bool) {
+func momentumScore(sig *stockstorev1.Stock, stockCtx *stockstorev1.Stock) (float64, bool) {
 	if sig != nil {
-		if v, ok := sig.Scores[MomentumKey]; ok {
-			return v, true
+		for _, s := range sig.GetScores() {
+			if s != nil && s.Category == MomentumKey {
+				return s.Value, true
+			}
 		}
 	}
 	if stockCtx != nil {
-		for _, s := range stockCtx.Scores {
+		for _, s := range stockCtx.GetScores() {
 			if s != nil && s.Category == MomentumKey {
 				return s.Value, true
 			}

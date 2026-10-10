@@ -86,7 +86,8 @@ func TestClient_GetStock(t *testing.T) {
 		timeout:          5 * time.Second,
 	}
 
-	stock, err := c.GetStock(context.Background(), "AAPL", "NASDAQ")
+	exch := "NASDAQ"
+	stock, err := c.GetStock(context.Background(), &stockstorev1.GetStockRequest{Symbol: "AAPL", Exchange: &exch})
 	if err != nil {
 		t.Fatalf("GetStock failed: %v", err)
 	}
@@ -95,6 +96,9 @@ func TestClient_GetStock(t *testing.T) {
 	}
 	if stock.Exchange != "NASDAQ" {
 		t.Errorf("expected NASDAQ, got %s", stock.Exchange)
+	}
+	if len(stock.Scores) != 1 || stock.Scores[0].Category != "test" || stock.Scores[0].Value != 1.0 {
+		t.Errorf("unexpected scores: %v", stock.Scores)
 	}
 }
 
@@ -141,8 +145,9 @@ func TestClient_Timeout(t *testing.T) {
 		timeout:          100 * time.Millisecond,
 	}
 
+	exch := "NASDAQ"
 	start := time.Now()
-	_, err = c.GetStock(context.Background(), "AAPL", "NASDAQ")
+	_, err = c.GetStock(context.Background(), &stockstorev1.GetStockRequest{Symbol: "AAPL", Exchange: &exch})
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("expected timeout error")

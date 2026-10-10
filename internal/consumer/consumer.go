@@ -1,6 +1,6 @@
-// Package consumer consumes kafkastockv1.StockUpdate messages from a Kafka
-// topic and hands valid ones to a Handler. Malformed messages and handler
-// failures are logged and skipped (committed) rather than routed to a DLQ.
+// Package consumer consumes stockstorev1.Stock messages from a Kafka topic
+// and hands valid ones to a Handler. Malformed messages and handler failures
+// are logged and skipped (committed) rather than routed to a DLQ.
 package consumer
 
 import (
@@ -12,12 +12,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"stocker-investor/internal/observability"
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
+	stockstorev1 "stocker-investor/proto/v1"
 )
 
-// Handler processes a decoded stock update. A non-nil error is logged and the
+// Handler processes a decoded stock signal. A non-nil error is logged and the
 // offending message is committed and skipped; the consumer keeps running.
-type Handler func(ctx context.Context, sig *kafkastockv1.StockUpdate) error
+type Handler func(ctx context.Context, sig *stockstorev1.Stock) error
 
 // Config holds the settings required to consume the stock topic.
 type Config struct {
@@ -69,7 +69,7 @@ func (c *Consumer) Run(ctx context.Context, h Handler) error {
 			continue
 		}
 
-		sig := &kafkastockv1.StockUpdate{}
+		sig := &stockstorev1.Stock{}
 		if err := proto.Unmarshal(m.Value, sig); err != nil {
 			log.Warn("kafka: malformed message", "topic", m.Topic, "offset", m.Offset, "error", err)
 			c.commit(ctx, m, log)

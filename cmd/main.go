@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"stocker-investor/internal/config"
 	"stocker-investor/internal/consumer"
 	"stocker-investor/internal/investor"
@@ -16,7 +18,6 @@ import (
 	"stocker-investor/internal/producer"
 	"stocker-investor/internal/storeclient"
 	stockstorev1 "stocker-investor/proto/v1"
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
 )
 
 func main() {
@@ -69,7 +70,7 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := cons.Run(ctx, newHandler(client, decider, prod)); err != nil {
+		if err := cons.Run(ctx, newHandler(client, decider, prod, cfg.INVESTOR_MAX_POSITION)); err != nil {
 			log.Error("consumer: run", "error", err)
 		}
 	}()
@@ -90,17 +91,21 @@ func main() {
 }
 
 // newHandler wires the signal → decide → publish pipeline for each consumed
-// stock update. Store context is optional: a lookup failure degrades to a
+// stock signal. Store context is optional: a lookup failure degrades to a
 // context-free decision rather than dropping the signal.
-func newHandler(client storeclient.Client, decider investor.Decider, prod *producer.Producer) consumer.Handler {
-	return func(ctx context.Context, sig *kafkastockv1.StockUpdate) error {
+func newHandler(client storeclient.Client, decider investor.Decider, prod *producer.Producer, maxPosition float64) consumer.Handler {
+	return func(ctx context.Context, sig *stockstorev1.Stock) error {
 		ctx = obs.With(ctx, correlationIDFor(sig))
 		log := obs.LoggerWithContext(ctx)
 		log.Debug("signal_received", "symbol", sig.GetSymbol(), "exchange", sig.GetExchange())
 
 		var ctxStock *stockstorev1.Stock
 		if client != nil {
-			s, err := client.GetStock(ctx, sig.GetSymbol(), sig.GetExchange())
+			exch := sig.GetExchange()
+			s, err := client.GetStock(ctx, &stockstorev1.GetStockRequest{
+				Symbol:   sig.GetSymbol(),
+				Exchange: &exch,
+			})
 			if err != nil {
 				log.Warn("store: get stock", "symbol", sig.GetSymbol(), "exchange", sig.GetExchange(), "error", err)
 				ctxStock = nil
@@ -116,33 +121,51 @@ func newHandler(client storeclient.Client, decider investor.Decider, prod *produ
 			"action", d.Action,
 			"position_size", d.PositionSize,
 			"confidence", d.Confidence,
+			"decided_at", d.DecidedAt,
 			"rationale", d.Rationale,
 		)
 
-		if err := prod.Publish(ctx, buildOutput(sig, d)); err != nil {
+		if err := prod.Publish(ctx, buildOutput(sig, d, maxPosition)); err != nil {
 			return fmt.Errorf("publish decision: %w", err)
 		}
 		return nil
 	}
 }
 
-// buildOutput encodes a Decision into a StockUpdate carrying the reserved
-// stocker_investor score keys.
-func buildOutput(sig *kafkastockv1.StockUpdate, d investor.Decision) *kafkastockv1.StockUpdate {
-	return &kafkastockv1.StockUpdate{
+// buildOutput encodes a Decision into a Stock carrying the reserved
+// stocker_investor ScoreEntry keys. Every published value is in [-1.0, 1.0]:
+// action ∈ {-1,0,1}, position_size ∈ [0,1], confidence ∈ [-1,1]. The decision
+// timestamp is logged (and carried in ScoreEntry.updated_at as advisory), not
+// published as a score.
+func buildOutput(sig *stockstorev1.Stock, d investor.Decision, maxPosition float64) *stockstorev1.Stock {
+	frac := 0.0
+	if maxPosition > 0 {
+		frac = clamp01(d.PositionSize / maxPosition)
+	}
+	ts := timestamppb.New(d.DecidedAt)
+	return &stockstorev1.Stock{
 		Symbol:   sig.GetSymbol(),
 		Exchange: sig.GetExchange(),
-		Scores: map[string]float64{
-			"stocker_investor.action":             float64(d.Action),
-			"stocker_investor.position_size":      d.PositionSize,
-			"stocker_investor.confidence":         d.Confidence,
-			"stocker_investor.decided_at_unix_ms": float64(d.DecidedAt.UnixMilli()),
+		Scores: []*stockstorev1.ScoreEntry{
+			{Category: "stocker_investor.action", Value: float64(d.Action), UpdatedAt: ts},
+			{Category: "stocker_investor.position_size", Value: frac, UpdatedAt: ts},
+			{Category: "stocker_investor.confidence", Value: d.Confidence, UpdatedAt: ts},
 		},
 	}
 }
 
+func clamp01(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
 // correlationIDFor returns a per-signal correlation ID derived from the symbol
 // and the current time.
-func correlationIDFor(sig *kafkastockv1.StockUpdate) string {
+func correlationIDFor(sig *stockstorev1.Stock) string {
 	return fmt.Sprintf("%s-%d", sig.GetSymbol(), time.Now().UnixNano())
 }

@@ -1,6 +1,6 @@
-// Package producer publishes kafkastockv1.StockUpdate messages to a Kafka
-// topic. When Kafka output is unconfigured (disabled or no topic), the producer
-// is a no-op: Publish logs at debug level and returns nil without connecting.
+// Package producer publishes stockstorev1.Stock messages to a Kafka topic.
+// When Kafka output is unconfigured (disabled or no topic), the producer is a
+// no-op: Publish logs at debug level and returns nil without connecting.
 package producer
 
 import (
@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"stocker-investor/internal/observability"
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
+	stockstorev1 "stocker-investor/proto/v1"
 )
 
 // Config holds the settings required to publish to the stock decision topic.
@@ -54,7 +54,7 @@ func New(cfg Config) *Producer {
 
 // Publish marshals sig and writes it to the configured topic, keyed by symbol.
 // A no-op producer logs at debug level and returns nil without sending.
-func (p *Producer) Publish(ctx context.Context, sig *kafkastockv1.StockUpdate) error {
+func (p *Producer) Publish(ctx context.Context, sig *stockstorev1.Stock) error {
 	log := observability.LoggerWithContext(ctx)
 
 	if p.noop {
@@ -64,7 +64,7 @@ func (p *Producer) Publish(ctx context.Context, sig *kafkastockv1.StockUpdate) e
 
 	value, err := proto.Marshal(sig)
 	if err != nil {
-		return fmt.Errorf("marshal stock update: %w", err)
+		return fmt.Errorf("marshal stock: %w", err)
 	}
 
 	msg := kafka.Message{Topic: p.topic, Key: []byte(sig.GetSymbol()), Value: value}

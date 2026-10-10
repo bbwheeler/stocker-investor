@@ -11,16 +11,16 @@ logging · Podman Quadlets
 ```
 ┌──────────────┐   protobuf        ┌──────────────────────────────┐
 │ kafka        │ ────▶             │ stocker-investor             │
-│ brokers      │   StockUpdate     │ consume → decide → publish   │
-│ (in topic)   │                   │ per-symbol cooldown          │
+│ brokers      │   stockstorev1.   │ consume → decide → publish   │
+│ (in topic)   │   Stock           │ per-symbol cooldown          │
 └──────────────┘                   └──────────────────────────────┘
         ▲                                      │
         │ protobuf (out topic)                 │ gRPC GetStock /
         │                                      ▼ GetStocks
 ┌──────────────┐                   ┌──────────────────────────────┐
 │ kafka        │ ◀────             │ stocker-store (gRPC :3500)   │
-│ brokers      │   StockUpdate     │ StockStore service           │
-└──────────────┘                   └──────────────────────────────┘
+│ brokers      │   stockstorev1.   │ StockStore service           │
+└──────────────┘   Stock           └──────────────────────────────┘
 ```
 
 This is **not** an order executor: it never talks to a broker API. It is a
@@ -29,43 +29,50 @@ compute-and-publish loop only. The earlier Python/IBKR design
 
 ## Overview
 
-The service is a single Go binary. It consumes `kafkastockv1.StockUpdate`
-messages (raw scored stock events) from `KAFKA_IN_TOPIC`, optionally reads
-context for the symbol via `stockstore.v1.StockStore.GetStock`, applies a
-single configurable decision rule, and publishes the decision as a
-`StockUpdate` on `KAFKA_OUT_TOPIC` carrying reserved `stocker_investor.*`
-score keys. Kafka output is a **no-op unless `KAFKA_OUT_TOPIC` is set**, and
-`INVESTOR_PAPER=1` disables publishing entirely (log-only paper mode).
+The service is a single Go binary. It consumes `stockstorev1.Stock` messages
+(raw scored stock events, `repeated ScoreEntry scores`) from `KAFKA_IN_TOPIC`,
+optionally reads context for the symbol via `stockstore.v1.StockStore.GetStock`,
+applies a single configurable decision rule, and publishes the decision as a
+`stockstorev1.Stock` on `KAFKA_OUT_TOPIC` carrying reserved `stocker_investor.*`
+`ScoreEntry` categories. Kafka output is a **no-op unless `KAFKA_OUT_TOPIC` is
+set**, and `INVESTOR_PAPER=1` disables publishing entirely (log-only paper
+mode).
+
+All message types — input and output — come from the shared protobuf contract in
+`stocker-store@main` (see [Protobuf provenance](#protobuf-provenance)). There is
+no `StockUpdate` / `kafkastockv1` type; the Kafka message is `stockstorev1.Stock`
+itself.
 
 ### Decision rule (v1)
 
-Reads `scores["momentum"]` (falling back to the store context when the signal
-carries none):
+Reads the `"momentum"` `ScoreEntry` (falling back to the store context when the
+signal carries none):
 
 - BUY when `momentum >= INVESTOR_MIN_MOMENTUM` and the per-symbol cooldown has elapsed
 - SELL when `momentum <= INVESTOR_MAX_MOMENTUM` and the per-symbol cooldown has elapsed
 - HOLD otherwise
 
-`position_size` is `INVESTOR_MAX_POSITION × |momentum|` (clamped); `confidence`
-is `momentum` clamped to `[-1, 1]`. A rationale string is logged but not carried
-in the message.
+`position_size` is `INVESTOR_MAX_POSITION × |momentum|` (clamped, a dollar
+amount); `confidence` is `momentum` clamped to `[-1, 1]`. A rationale string is
+logged but not carried in the message.
 
-### Reserved output score keys
+### Reserved output score categories
 
-| Key | Value | Meaning |
+The published decision is a `stockstorev1.Stock` whose `scores` are
+`ScoreEntry`s. `stocker-store` rejects any `ScoreEntry.value` outside
+`[-1.0, 1.0]`, so every value below is in range:
+
+| `ScoreEntry.category` | `ScoreEntry.value` | Meaning |
 |---|---|---|
 | `stocker_investor.action` | `-1.0` / `0.0` / `+1.0` | SELL / HOLD / BUY |
 | `stocker_investor.position_size` | `[0.0, 1.0]` | Fraction of max allowed position |
 | `stocker_investor.confidence` | `[-1.0, 1.0]` | Decision confidence |
-| `stocker_investor.decided_at_unix_ms` | `> 0` (as `double`) | Unix-millis timestamp |
 
-> **Known deviation:** the implementation currently publishes the *sized* value
-> (`INVESTOR_MAX_POSITION × |momentum|`) under `stocker_investor.position_size`
-> instead of the `[0.0, 1.0]` fraction documented above, and
-> `stocker_investor.decided_at_unix_ms` is a millisecond timestamp. Both fall
-> outside the `[-1.0, 1.0]` range that `stocker-store` enforces on ingested
-> scores, so do not point a `stocker-store` Kafka subscriber at this output
-> topic as-is.
+`position_size` is normalized from the dollar amount
+(`Decision.PositionSize / INVESTOR_MAX_POSITION`, clamped to `[0, 1]`) before
+publishing. `ScoreEntry.updated_at` is set to the decision time as advisory
+metadata; `stocker-store` stamps its own clock on write. The decision timestamp
+is logged, not published as a score.
 
 ## Configuration
 
@@ -76,7 +83,7 @@ All configuration is via environment variables. The operator creates
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `KAFKA_IN_BROKERS` | Yes | — | Comma-separated Kafka bootstrap servers for the **input** topic |
-| `KAFKA_IN_TOPIC` | Yes | — | Topic for `kafkastockv1.StockUpdate` events to consume |
+| `KAFKA_IN_TOPIC` | Yes | — | Topic for `stockstorev1.Stock` events to consume |
 | `KAFKA_IN_GROUP_ID` | No | `stocker-investor` | Consumer group ID |
 | `KAFKA_OUT_BROKERS` | No | falls back to `KAFKA_IN_BROKERS` | Bootstrap servers for the **output** topic |
 | `KAFKA_OUT_TOPIC` | No | — | Topic to publish decisions on; **no-op when unset** |
@@ -154,17 +161,18 @@ internal/config/            # env-var config parsing + validation
 internal/observability/     # slog JSON logging + correlation_id
 internal/storeclient/       # gRPC client for stockstorev1.StockStore
 internal/investor/          # pure decision logic + per-symbol cooldown
-internal/consumer/          # Kafka consumer (kafkastockv1 decode)
-internal/producer/          # Kafka producer (kafkastockv1 encode; no-op when disabled/paper)
-proto/v1/                   # pre-generated protobufs (copied from stocker-store)
+internal/consumer/          # Kafka consumer (stockstorev1.Stock decode)
+internal/producer/          # Kafka producer (stockstorev1.Stock encode; no-op when disabled/paper)
+proto/v1/                   # pre-generated protobufs (copied from stocker-store@main)
 deploy/                     # push.sh, quadlet unit, .env.podman sample
 ```
 
 ### Protobuf provenance
 
-All message types come from the shared `stocker-store` contract, snapshotted
-verbatim (no `protoc` run in this repo). See `proto/README.md` for the pinned
-tag and the update procedure. Do not hand-edit the generated files.
+All message types come from the shared `stocker-store@main` contract,
+snapshotted verbatim (no `protoc` run in this repo). See `proto/README.md` for
+the pinned source and the update procedure. Do not hand-edit the generated
+files.
 
 ## Further reading
 

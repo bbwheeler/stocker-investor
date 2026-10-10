@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	stockstorev1 "stocker-investor/proto/v1"
-	kafkastockv1 "stocker-investor/proto/v1/kafka"
 )
 
 func TestActionValues(t *testing.T) {
@@ -25,7 +24,7 @@ func TestDecider_Decide(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		sig        *kafkastockv1.StockUpdate
+		sig        *stockstorev1.Stock
 		stockCtx   *stockstorev1.Stock
 		cfg        Config
 		wantAction Action
@@ -98,7 +97,7 @@ func TestDecider_Decide(t *testing.T) {
 		},
 		{
 			name:       "hold when no momentum score",
-			sig:        &kafkastockv1.StockUpdate{Symbol: "AAPL", Exchange: "NASDAQ"},
+			sig:        &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"},
 			cfg:        baseCfg,
 			wantAction: HOLD,
 			wantPos:    0,
@@ -116,7 +115,7 @@ func TestDecider_Decide(t *testing.T) {
 		},
 		{
 			name:       "momentum from store context fallback",
-			sig:        &kafkastockv1.StockUpdate{Symbol: "AAPL", Exchange: "NASDAQ"},
+			sig:        &stockstorev1.Stock{Symbol: "AAPL", Exchange: "NASDAQ"},
 			stockCtx:   storeContext(0.5),
 			cfg:        baseCfg,
 			wantAction: BUY,
@@ -203,11 +202,11 @@ func TestDecider_CooldownDisabled(t *testing.T) {
 	}
 }
 
-func signal(symbol string, momentum float64) *kafkastockv1.StockUpdate {
-	return &kafkastockv1.StockUpdate{
+func signal(symbol string, momentum float64) *stockstorev1.Stock {
+	return &stockstorev1.Stock{
 		Symbol:   symbol,
 		Exchange: "NASDAQ",
-		Scores:   map[string]float64{MomentumKey: momentum},
+		Scores:   []*stockstorev1.ScoreEntry{{Category: MomentumKey, Value: momentum}},
 	}
 }
 
