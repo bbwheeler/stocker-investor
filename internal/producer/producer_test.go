@@ -157,6 +157,12 @@ func TestCloseClosesWriter(t *testing.T) {
 
 func TestProducer_PaperMode(t *testing.T) {
 	p := New(Config{Brokers: []string{"b:9092"}, Topic: "out", Enabled: true, Paper: true})
+	if !p.noop {
+		t.Errorf("noop = false, want true in paper mode")
+	}
+	if p.w != nil {
+		t.Errorf("writer = %v, want nil in paper mode", p.w)
+	}
 	if err := p.Publish(context.Background(), &stockstorev1.Stock{Symbol: "AAPL"}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}

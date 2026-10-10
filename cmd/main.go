@@ -142,24 +142,32 @@ func buildOutput(sig *stockstorev1.Stock, d investor.Decision, maxPosition float
 	if maxPosition > 0 {
 		frac = clamp01(d.PositionSize / maxPosition)
 	}
+	// Clamp at the publish boundary so the [-1.0, 1.0] invariant holds for
+	// every emitted value regardless of the decider implementation.
+	action := clampRange(float64(d.Action), -1, 1)
+	confidence := clampRange(d.Confidence, -1, 1)
 	ts := timestamppb.New(d.DecidedAt)
 	return &stockstorev1.Stock{
 		Symbol:   sig.GetSymbol(),
 		Exchange: sig.GetExchange(),
 		Scores: []*stockstorev1.ScoreEntry{
-			{Category: "stocker_investor.action", Value: float64(d.Action), UpdatedAt: ts},
+			{Category: "stocker_investor.action", Value: action, UpdatedAt: ts},
 			{Category: "stocker_investor.position_size", Value: frac, UpdatedAt: ts},
-			{Category: "stocker_investor.confidence", Value: d.Confidence, UpdatedAt: ts},
+			{Category: "stocker_investor.confidence", Value: confidence, UpdatedAt: ts},
 		},
 	}
 }
 
 func clamp01(v float64) float64 {
-	if v < 0 {
-		return 0
+	return clampRange(v, 0, 1)
+}
+
+func clampRange(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
 	}
-	if v > 1 {
-		return 1
+	if v > hi {
+		return hi
 	}
 	return v
 }
