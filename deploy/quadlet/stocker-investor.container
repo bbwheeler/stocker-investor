@@ -1,0 +1,15 @@
+[Unit]
+After=network-online.target
+
+[Container]
+Image=git.wheeli.ca/brian/stocker-investor:latest
+EnvironmentFile=%h/.config/stocker-investor/.env.podman
+AutoUpdate=registry
+Network=host
+
+[Service]
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
